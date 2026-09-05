@@ -30,6 +30,7 @@ static std::string g_memory = "512";
 static std::string g_smp = "2";
 static std::string g_forcedAccel;
 static std::string g_qemuBin;
+static std::string g_dataImg;
 
 static std::string getEnv(const char* name, const std::string& def) {
     const char* v = std::getenv(name);
@@ -283,7 +284,7 @@ static std::vector<std::string> buildQemuArgs(const std::string& qemuBin,
     args.push_back("-nic");
     args.push_back("user,model=e1000,hostfwd=tcp:" + g_host + ":" + g_hostPort + "-:" + g_guestPort);
     args.push_back("-drive");
-    args.push_back("file=" + dir + "/data.img,format=raw,if=virtio");
+    args.push_back("file=" + g_dataImg + ",format=raw,if=virtio");
     std::ifstream af(argsFile);
     if (af.peek() != std::ifstream::traits_type::eof()) {
         args.push_back("-fw_cfg");
@@ -334,6 +335,9 @@ int main(int argc, char** argv) {
     std::string dir = executableDir();
     if (dir.empty()) dir = ".";
     std::string assetDir = dir + "/qemu";
+
+    g_dataImg = getEnv("QEMU_DATA_IMG", "");
+    if (g_dataImg.empty()) g_dataImg = assetDir + "/data.img";
 
     std::string qemuBin = locateQemu(assetDir);
 
