@@ -106,8 +106,6 @@ wrapper-lite-qemu.exe
 
 # QEMU generated assets
 qemu/data.img
-qemu/lite-initramfs.cpio.gz
-qemu/vmlinuz-lite-qemu
 qemu/bin/
 
 # Local account / generated host files
@@ -117,3 +115,11 @@ run
 run.cpp
 build-run.sh
 build-run/
+
+# Flatpak build artifacts
+.flatpak-builder/
+build-dir/
+flatpak/repo/
+flatpak/build-dir/
+flatpak/*.whl
+flatpak/assets/
