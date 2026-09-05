@@ -17,6 +17,10 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <limits.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#include <signal.h>
+#endif
 #endif
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
@@ -40,6 +44,18 @@ static std::string getEnv(const char* name, const std::string& def) {
 static bool fileExists(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
     return f.good();
+}
+
+/* Ensure this process dies as soon as its parent does, even if the parent is
+   killed with SIGKILL.  Guard against the parent dying between fork/time of
+   prctl, in which case the signal would never fire. */
+static void armParentDeath() {
+#ifdef __linux__
+    prctl(PR_SET_PDEATHSIG, SIGKILL);
+    if (getppid() == 1) _exit(1);
+#else
+    (void)0;
+#endif
 }
 
 static std::string executableDir() {
@@ -175,6 +191,9 @@ static int spawnAndWait(const std::vector<std::string>& args) {
         return 1;
     }
     if (pid == 0) {
+        /* Die if the launcher dies: an app killed with SIGKILL must never
+           leave the guest running. */
+        armParentDeath();
         execvp(argv[0], argv.data());
         std::perror("execvp");
         _exit(127);
@@ -301,6 +320,9 @@ static int runQemu(const std::string& qemuBin, const std::string& accel,
 }
 
 int main(int argc, char** argv) {
+    /* The launcher's parent is the host app: die with it, always. */
+    armParentDeath();
+
     /* Environment variables remain as fallbacks; command-line flags win. */
     g_host = getEnv("LITE_QEMU_HOST", "127.0.0.1");
     g_hostPort = getEnv("HOST_PORT", "12340");
