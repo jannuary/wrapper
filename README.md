@@ -96,6 +96,18 @@ All responses use:
 | `/webplayback` | GET | `adamId` |
 | `/license` | POST | JSON: `adamId`, `challenge`, `uri` |
 | `/status` | GET | returns `regions` (list of storefront codes this wrapper can serve) |
+| `/login` | POST | credentials via headers (see below) |
+| `/token` | POST | token overrides via headers (see below) |
+
+Credentials can be supplied to a running wrapper over HTTP headers, so the
+service does not have to be restarted (and nothing has to sit in argv):
+
+- `POST /login` — login and cache fresh tokens at runtime. Headers:
+  - `X-Apple-User` (required), `X-Apple-Password` (required),
+    `X-Apple-2FA-Code` (optional; otherwise write the code to `2fa.txt`).
+- `POST /token` — override the cached dev/music tokens and storefront without
+  logging in. Any header present is applied:
+  - `X-Dev-Token`, `X-Music-Token`, `X-Storefront`.
 
 ## lite arguments
 

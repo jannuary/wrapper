@@ -451,6 +451,105 @@ static void signal_worker() {
 }
 
 /* ============================== */
+/*     Credentials over headers   */
+/*     (runtime login / tokens)   */
+/* ============================== */
+
+/* POST /login
+ *   X-Apple-User:     Apple ID account name  (required)
+ *   X-Apple-Password: Apple ID password       (required)
+ *   X-Apple-2FA-Code: optional 2FA code       (or drop it in <base-dir>/2fa.txt)
+ * Runs the native Apple login in the current (already hook-initialized)
+ * process and caches STOREFRONT_ID / DEV_TOKEN / MUSIC_TOKEN, same as --login. */
+static void handle_login(httplib::Request const& req, httplib::Response& res) {
+    const std::string user = req.get_header_value("X-Apple-User");
+    const std::string pass = req.get_header_value("X-Apple-Password");
+    if (user.empty() || pass.empty()) {
+        res.status = 400;
+        res.set_content(json_error(400, "missing X-Apple-User or X-Apple-Password header"),
+                        "application/json");
+        return;
+    }
+    const std::string code = req.get_header_value("X-Apple-2FA-Code");
+    std::string effective = pass;
+    if (!code.empty()) effective += code;
+
+    set_credentials(user.c_str(), effective.c_str());
+
+    if (!login(g_reqCtx)) {
+        res.status = 401;
+        res.set_content(json_error(401, "login failed"), "application/json");
+        return;
+    }
+
+    if (!cache_login_tokens()) {
+        LOG_WARN("login succeeded but token cache failed");
+        res.status = 500;
+        res.set_content(json_error(500, "token cache failed"), "application/json");
+        return;
+    }
+
+    std::string sf, dev, music;
+    {
+        std::lock_guard<std::mutex> lock(g_tokens_mutex);
+        sf = g_tokens.storefront_id;
+        dev = g_tokens.dev_token;
+        music = g_tokens.music_token;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_tokens_mutex);
+        if (!sf.empty()) g_tokens.storefront_id = normalize_storefront_id(sf);
+        if (g_tokens.storefront_id.empty()) g_tokens.storefront_id = "us";
+        if (!dev.empty()) g_tokens.dev_token = dev;
+        if (!music.empty()) g_tokens.music_token = music;
+        save_token_cache();
+    }
+
+    LOG_INFO("login via headers succeeded (storefront=%s)",
+             g_tokens.storefront_id.c_str());
+
+    cJSON* data = cJSON_CreateObject();
+    cJSON_AddStringToObject(data, "storefront", g_tokens.storefront_id.c_str());
+    cJSON_AddBoolToObject(data, "cached", true);
+    res.set_content(json_success(data), "application/json");
+}
+
+/* POST /token
+ *   X-Dev-Token:    dev token (optional)
+ *   X-Music-Token:  Apple Music user token (optional)
+ *   X-Storefront:   two-letter storefront code (optional)
+ * Overrides the cached tokens used by /m3u8 /key /lyrics /webplayback /license
+ * without restarting the service.  Any header that is present is applied. */
+static void handle_token(httplib::Request const& req, httplib::Response& res) {
+    const std::string dev = req.get_header_value("X-Dev-Token");
+    const std::string music = req.get_header_value("X-Music-Token");
+    const std::string storefront = req.get_header_value("X-Storefront");
+    if (dev.empty() && music.empty() && storefront.empty()) {
+        res.status = 400;
+        res.set_content(json_error(400, "no token headers provided"), "application/json");
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_tokens_mutex);
+        if (!dev.empty()) g_tokens.dev_token = dev;
+        if (!music.empty()) g_tokens.music_token = music;
+        if (!storefront.empty()) {
+            g_tokens.storefront_id = normalize_storefront_id(storefront);
+            if (g_tokens.storefront_id.empty()) g_tokens.storefront_id = "us";
+        }
+        save_token_cache();
+    }
+
+    cJSON* data = cJSON_CreateObject();
+    cJSON_AddStringToObject(data, "storefront", g_tokens.storefront_id.c_str());
+    cJSON_AddBoolToObject(data, "music_token", !g_tokens.music_token.empty());
+    cJSON_AddBoolToObject(data, "dev_token", !g_tokens.dev_token.empty());
+    res.set_content(json_success(data), "application/json");
+}
+
+/* ============================== */
 /*     Main entry point           */
 /* ============================== */
 
@@ -632,6 +731,8 @@ int main(int argc, char* argv[]) {
     svr.Get("/lyrics", handle_lyrics);
     svr.Get("/webplayback", handle_webplayback);
     svr.Post("/license", handle_license);
+    svr.Post("/login", handle_login);
+    svr.Post("/token", handle_token);
 
     svr.Get("/status", [](const httplib::Request&, httplib::Response& res) {
         std::string storefront;
