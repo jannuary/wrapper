@@ -91,6 +91,7 @@ void credentialHandler(struct shared_ptr* credReqPtr,
                 std::lock_guard<std::mutex> lk(g_login_mu);
                 g_2fa_pending = true;
             }
+            g_login_cv.notify_all();
             LOG_WARN("2FA required in service mode: repost /login with X-Apple-2FA-Code");
             {
                 std::unique_lock<std::mutex> lk(g_login_mu);
@@ -98,6 +99,12 @@ void credentialHandler(struct shared_ptr* credReqPtr,
                                     [] { return g_code_prepended; });
                 if (!g_code_prepended) {
                     LOG_WARN("2FA code timeout (5 min), resolving flow with auth error");
+                } else {
+                    /* Consume the delivered code: if Apple re-prompts for a
+                     * second code (e.g. a wrong one), we must park again and
+                     * wait for a fresh one rather than blindly resubmitting
+                     * the same failed code into a lockout. */
+                    g_code_prepended = false;
                 }
             }
         } else {
@@ -210,6 +217,13 @@ bool login(struct shared_ptr ctx) {
 
 static void login_worker_impl() {
     bool ok = login(g_reqCtx);
+    if (ok) {
+        if (!cache_login_tokens()) {
+            LOG_WARN("login succeeded but token cache failed");
+        }
+    } else {
+        LOG_WARN("async login failed");
+    }
     {
         std::lock_guard<std::mutex> lk(g_login_mu);
         g_login_ok = ok;
@@ -218,13 +232,6 @@ static void login_worker_impl() {
         g_code_prepended = false;
     }
     g_login_cv.notify_all();
-    if (!ok) {
-        LOG_WARN("async login failed");
-        return;
-    }
-    if (!cache_login_tokens()) {
-        LOG_WARN("login succeeded but token cache failed");
-    }
 }
 
 void login_http_start(bool code_prepended) {
