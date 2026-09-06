@@ -4,12 +4,23 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
+#include <thread>
 #include <unistd.h>
 
 bool g_2fa_pending = false;
 bool g_code_prepended = false;
 bool g_login_http = false;
 bool g_service_mode = false;
+bool g_login_running = false;
+bool g_login_ok = false;
+
+/* Coordinates the async /login 2FA handshake between the HTTP handler thread
+ * and the worker thread running login() in the background. */
+static std::mutex g_login_mu;
+static std::condition_variable g_login_cv;
 
 void dialogHandler(long j, struct shared_ptr* protoDialogPtr,
                    struct shared_ptr* respHandler) {
@@ -70,10 +81,25 @@ void credentialHandler(struct shared_ptr* credReqPtr,
         } else if (g_login_http || g_service_mode) {
             /* HTTP service (`/login` request or any service-mode auth flow,
                e.g. an expired lease during /m3u8): never block a server
-               thread on an interactive 2FA wait.  Flag it so the host app is
-               told "2fa_required" and resubmits the same flow with a code. */
-            g_2fa_pending = true;
+               thread on an interactive 2FA wait, and never resubmit without
+               a code -- Apple counts code-less resubmits as failed attempts
+               and locks the flow ("incorrectly entered more than once").
+               Park this (worker) thread until POST /login is reposted with
+               X-Apple-2FA-Code, which the handler delivers by setting
+               g_code_prepended and signalling the CV below. */
+            {
+                std::lock_guard<std::mutex> lk(g_login_mu);
+                g_2fa_pending = true;
+            }
             LOG_WARN("2FA required in service mode: repost /login with X-Apple-2FA-Code");
+            {
+                std::unique_lock<std::mutex> lk(g_login_mu);
+                g_login_cv.wait_for(lk, std::chrono::minutes(5),
+                                    [] { return g_code_prepended; });
+                if (!g_code_prepended) {
+                    LOG_WARN("2FA code timeout (5 min), resolving flow with auth error");
+                }
+            }
         } else {
             std::string path = std::string(g_base_dir) + "/2fa.txt";
             bool got_code = false;
@@ -178,4 +204,72 @@ bool login(struct shared_ptr ctx) {
         return false;
     }
     return true;
+}
+
+/* ---- Async login worker (POST /login over HTTP) ---- */
+
+static void login_worker_impl() {
+    bool ok = login(g_reqCtx);
+    {
+        std::lock_guard<std::mutex> lk(g_login_mu);
+        g_login_ok = ok;
+        g_login_running = false;
+        g_2fa_pending = false;
+        g_code_prepended = false;
+    }
+    g_login_cv.notify_all();
+    if (!ok) {
+        LOG_WARN("async login failed");
+        return;
+    }
+    if (!cache_login_tokens()) {
+        LOG_WARN("login succeeded but token cache failed");
+    }
+}
+
+void login_http_start(bool code_prepended) {
+    {
+        std::lock_guard<std::mutex> lk(g_login_mu);
+        g_login_running = true;
+        g_login_ok = false;
+        g_2fa_pending = false;
+        g_code_prepended = code_prepended;
+    }
+    g_login_cv.notify_all();
+    std::thread t(login_worker_impl);
+    t.detach();
+}
+
+int login_http_submit_code() {
+    std::unique_lock<std::mutex> lk(g_login_mu);
+    if (!g_login_running) return 0;
+    g_code_prepended = true;
+    g_2fa_pending = false;
+    g_login_cv.notify_all();
+    while (g_login_running) {
+        g_login_cv.wait(lk);
+    }
+    return 1;
+}
+
+int login_http_wait(int timeout_ms) {
+    std::unique_lock<std::mutex> lk(g_login_mu);
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(timeout_ms);
+    for (;;) {
+        if (g_2fa_pending && g_login_running) {
+            return LOGIN_HTTP_PARKED;
+        }
+        if (!g_login_running) {
+            return g_login_ok ? LOGIN_HTTP_OK : LOGIN_HTTP_FAILED;
+        }
+        if (g_login_cv.wait_until(lk, deadline) == std::cv_status::timeout) {
+            return LOGIN_HTTP_TIMEOUT;
+        }
+    }
+}
+
+bool login_http_active() {
+    std::lock_guard<std::mutex> lk(g_login_mu);
+    return g_login_running;
 }

@@ -492,28 +492,40 @@ static void handle_login(httplib::Request const& req, httplib::Response& res) {
     if (!code.empty()) effective += code;
 
     g_login_http = true;
-    g_2fa_pending = false;
-    g_code_prepended = !code.empty();
     set_credentials(user.c_str(), effective.c_str());
 
-    if (!login(g_reqCtx)) {
-        if (g_2fa_pending) {
-            res.status = 401;
-            res.set_content(json_error_status(401, "2fa_required",
-                                              "2FA required, repost with X-Apple-2FA-Code header"),
-                            "application/json");
+    int outcome;
+    if (!code.empty()) {
+        /* Repost with the code (already appended to the password).  If a flow
+         * is parked on 2FA, deliver the code and block until it settles;
+         * otherwise this is a one-shot user+pass+code attempt. */
+        if (login_http_submit_code()) {
+            outcome = login_http_wait(300000);
         } else {
-            res.status = 401;
-            res.set_content(json_error_status(401, "credential_error", "login failed"),
-                            "application/json");
+            login_http_start(true);
+            outcome = login_http_wait(300000);
         }
-        return;
+    } else {
+        if (login_http_active()) {
+            /* A previous attempt is still running/parked; keep waiting on it. */
+            outcome = login_http_wait(300000);
+        } else {
+            login_http_start(false);
+            outcome = login_http_wait(300000);
+        }
     }
 
-    if (!cache_login_tokens()) {
-        LOG_WARN("login succeeded but token cache failed");
-        res.status = 500;
-        res.set_content(json_error(500, "token cache failed"), "application/json");
+    if (outcome == LOGIN_HTTP_PARKED) {
+        res.status = 401;
+        res.set_content(json_error_status(401, "2fa_required",
+                                          "2FA required, repost with X-Apple-2FA-Code header"),
+                        "application/json");
+        return;
+    }
+    if (outcome != LOGIN_HTTP_OK) {
+        res.status = 401;
+        res.set_content(json_error_status(401, "credential_error", "login failed"),
+                        "application/json");
         return;
     }
 

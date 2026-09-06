@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <condition_variable>
 
 /* ---- JSON response helpers ---- */
 struct LiteResponse {
@@ -102,6 +103,28 @@ extern bool g_2fa_pending;
 extern bool g_code_prepended;
 extern bool g_login_http;
 extern bool g_service_mode;
+extern bool g_login_running;
+extern bool g_login_ok;
+
+/* Async 2FA-aware login state machine (auth.cpp), driven by POST /login so a
+ * server thread is never blocked inside Apple's AuthenticateFlow. */
+enum LoginHttpOutcome {
+    LOGIN_HTTP_PARKED = 0,   /* flow parked awaiting an X-Apple-2FA-Code repost */
+    LOGIN_HTTP_OK = 1,       /* login() completed and tokens were cached */
+    LOGIN_HTTP_FAILED = 2,   /* login() completed with an auth error */
+    LOGIN_HTTP_TIMEOUT = 3,  /* no park/finish within the wait window */
+};
+/* Start/run login() on a detached worker thread; creds must already be set.
+ * code_prepended=true means the 2FA code is already embedded in the password
+ * (one-shot user+pass+code request) and must be submitted without re-parking. */
+void login_http_start(bool code_prepended);
+/* Deliver X-Apple-2FA-Code to a currently running flow (already embedded in the
+ * password).  Returns 1 if a running flow was woken, 0 if none was running. */
+int login_http_submit_code();
+/* Block until the flow parks on 2FA, finishes, or timeout_ms elapses. */
+int login_http_wait(int timeout_ms);
+/* 1 while a login worker thread is running (this covers the parked state). */
+bool login_http_active();
 
 void install_hooks();
 struct shared_ptr init_ctx();
