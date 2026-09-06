@@ -6,6 +6,10 @@
 #include <string>
 #include <unistd.h>
 
+bool g_2fa_pending = false;
+bool g_code_prepended = false;
+bool g_login_http = false;
+
 void dialogHandler(long j, struct shared_ptr* protoDialogPtr,
                    struct shared_ptr* respHandler) {
     (void)respHandler;
@@ -59,48 +63,59 @@ void credentialHandler(struct shared_ptr* credReqPtr,
     int passLen = amPassword ? (int)strlen(amPassword) : 0;
 
     if (need2FA) {
-        std::string path = std::string(g_base_dir) + "/2fa.txt";
-        bool got_code = false;
-        if (!g_code_from_file && isatty(STDIN_FILENO)) {
-            char code[7];
-            printf("2FA code: ");
-            fflush(stdout);
-            if (scanf("%6s", code) == 1 && amPassword) {
-                char tmp[64];
-                snprintf(tmp, sizeof(tmp), "%s%s", amPassword, code);
-                free(amPassword);
-                amPassword = strdup(tmp);
-                got_code = true;
-            }
-        }
-        if (!got_code) {
-            if (!file_exists(path.c_str())) {
-                LOG_WARN("Enter your 2FA code into %s/2fa.txt", g_base_dir);
-                int count = 0;
-                while (!file_exists(path.c_str()) && count < 20) {
-                    sleep(3);
-                    count++;
-                }
-                if (!file_exists(path.c_str())) {
-                    LOG_WARN("2FA code timeout (60s), aborting login");
-                    exit(1);
-                }
-            }
-            FILE* fp = fopen(path.c_str(), "r");
-            if (fp) {
-                if (amPassword) {
+        if (g_code_prepended) {
+            /* HTTP /login supplied X-Apple-2FA-Code; it is already embedded
+               in amPassword.  Just resubmit as-is, no re-wait / re-append. */
+        } else if (g_login_http) {
+            /* HTTP /login: never block the request thread on a 2FA wait.
+               Flag it so handle_login replies "2fa_required" and resubmit
+               without a code; the flow will end and we map that signal. */
+            g_2fa_pending = true;
+            LOG_WARN("2FA required: repost /login with X-Apple-2FA-Code");
+        } else {
+            std::string path = std::string(g_base_dir) + "/2fa.txt";
+            bool got_code = false;
+            if (!g_code_from_file && isatty(STDIN_FILENO)) {
+                char code[7];
+                printf("2FA code: ");
+                fflush(stdout);
+                if (scanf("%6s", code) == 1 && amPassword) {
                     char tmp[64];
-                    snprintf(tmp, sizeof(tmp), "%s", amPassword);
-                    if (fscanf(fp, "%6s", tmp + passLen) == 1) {
-                        free(amPassword);
-                        amPassword = strdup(tmp);
+                    snprintf(tmp, sizeof(tmp), "%s%s", amPassword, code);
+                    free(amPassword);
+                    amPassword = strdup(tmp);
+                    got_code = true;
+                }
+            }
+            if (!got_code) {
+                if (!file_exists(path.c_str())) {
+                    LOG_WARN("Enter your 2FA code into %s/2fa.txt", g_base_dir);
+                    int count = 0;
+                    while (!file_exists(path.c_str()) && count < 20) {
+                        sleep(3);
+                        count++;
+                    }
+                    if (!file_exists(path.c_str())) {
+                        LOG_WARN("2FA code timeout (60s), aborting login");
+                        exit(1);
                     }
                 }
-                fclose(fp);
-                remove(path.c_str());
-                LOG_WARN("Code file detected! Logging in...");
-            } else {
-                LOG_WARN("Failed to open 2fa.txt");
+                FILE* fp = fopen(path.c_str(), "r");
+                if (fp) {
+                    if (amPassword) {
+                        char tmp[64];
+                        snprintf(tmp, sizeof(tmp), "%s", amPassword);
+                        if (fscanf(fp, "%6s", tmp + passLen) == 1) {
+                            free(amPassword);
+                            amPassword = strdup(tmp);
+                        }
+                    }
+                    fclose(fp);
+                    remove(path.c_str());
+                    LOG_WARN("Code file detected! Logging in...");
+                } else {
+                    LOG_WARN("Failed to open 2fa.txt");
+                }
             }
         }
     }

@@ -98,6 +98,9 @@ struct shared_ptr;
 extern struct shared_ptr g_reqCtx;
 extern bool g_ssl_verify_disabled;
 extern bool g_code_from_file;
+extern bool g_2fa_pending;
+extern bool g_code_prepended;
+extern bool g_login_http;
 
 void install_hooks();
 struct shared_ptr init_ctx();

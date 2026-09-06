@@ -97,6 +97,17 @@ static std::string json_error(int code, const std::string& msg) {
     return s;
 }
 
+static std::string json_error_status(int code, const std::string& status,
+                                     const std::string& msg) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "code", code);
+    cJSON_AddStringToObject(root, "status", status.c_str());
+    cJSON_AddStringToObject(root, "msg", msg.c_str());
+    std::string s = json_dump(root);
+    cJSON_Delete(root);
+    return s;
+}
+
 #include "storefront_ids.inc"
 
 /* The Android lib writes storefront identifiers like "143462-1,31"; the Apple
@@ -458,10 +469,16 @@ static void signal_worker() {
 /* POST /login
  *   X-Apple-User:     Apple ID account name  (required)
  *   X-Apple-Password: Apple ID password       (required)
- *   X-Apple-2FA-Code: optional 2FA code       (or drop it in <base-dir>/2fa.txt)
+ *   X-Apple-2FA-Code: optional 2FA code
+ * Two-phase HSA2: a first request without the code that hits 2FA replies
+ * 401 {"status":"2fa_required"}; repost with X-Apple-2FA-Code to finish.
+ * A one-shot combined user + pass + code request also works.
  * Runs the native Apple login in the current (already hook-initialized)
  * process and caches STOREFRONT_ID / DEV_TOKEN / MUSIC_TOKEN, same as --login. */
 static void handle_login(httplib::Request const& req, httplib::Response& res) {
+    static std::mutex login_mutex;
+    std::lock_guard<std::mutex> lock(login_mutex);
+
     const std::string user = req.get_header_value("X-Apple-User");
     const std::string pass = req.get_header_value("X-Apple-Password");
     if (user.empty() || pass.empty()) {
@@ -474,11 +491,22 @@ static void handle_login(httplib::Request const& req, httplib::Response& res) {
     std::string effective = pass;
     if (!code.empty()) effective += code;
 
+    g_login_http = true;
+    g_2fa_pending = false;
+    g_code_prepended = !code.empty();
     set_credentials(user.c_str(), effective.c_str());
 
     if (!login(g_reqCtx)) {
-        res.status = 401;
-        res.set_content(json_error(401, "login failed"), "application/json");
+        if (g_2fa_pending) {
+            res.status = 401;
+            res.set_content(json_error_status(401, "2fa_required",
+                                              "2FA required, repost with X-Apple-2FA-Code header"),
+                            "application/json");
+        } else {
+            res.status = 401;
+            res.set_content(json_error_status(401, "credential_error", "login failed"),
+                            "application/json");
+        }
         return;
     }
 
@@ -515,12 +543,29 @@ static void handle_login(httplib::Request const& req, httplib::Response& res) {
     res.set_content(json_success(data), "application/json");
 }
 
+/* GET /token
+ * Returns the currently cached tokens so a host app can adopt them as its
+ * own Apple Music API credentials (dev token, user token, storefront). */
+static void handle_token_get(httplib::Request const&, httplib::Response& res) {
+    cJSON* data = cJSON_CreateObject();
+    {
+        std::lock_guard<std::mutex> lock(g_tokens_mutex);
+        cJSON_AddStringToObject(data, "dev_token", g_tokens.dev_token.c_str());
+        cJSON_AddStringToObject(data, "music_token", g_tokens.music_token.c_str());
+        cJSON_AddStringToObject(data, "storefront", g_tokens.storefront_id.c_str());
+        cJSON_AddBoolToObject(data, "music_token_present", !g_tokens.music_token.empty());
+        cJSON_AddBoolToObject(data, "dev_token_present", !g_tokens.dev_token.empty());
+    }
+    res.set_content(json_success(data), "application/json");
+}
+
 /* POST /token
  *   X-Dev-Token:    dev token (optional)
  *   X-Music-Token:  Apple Music user token (optional)
  *   X-Storefront:   two-letter storefront code (optional)
  * Overrides the cached tokens used by /m3u8 /key /lyrics /webplayback /license
- * without restarting the service.  Any header that is present is applied. */
+ * without restarting the service.  Any header that is present is applied.
+ * GET /token returns the current cache (see handle_token_get). */
 static void handle_token(httplib::Request const& req, httplib::Response& res) {
     const std::string dev = req.get_header_value("X-Dev-Token");
     const std::string music = req.get_header_value("X-Music-Token");
@@ -733,6 +778,7 @@ int main(int argc, char* argv[]) {
     svr.Post("/license", handle_license);
     svr.Post("/login", handle_login);
     svr.Post("/token", handle_token);
+    svr.Get("/token", handle_token_get);
 
     svr.Get("/status", [](const httplib::Request&, httplib::Response& res) {
         std::string storefront;
