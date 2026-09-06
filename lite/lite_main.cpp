@@ -737,6 +737,7 @@ int main(int argc, char* argv[]) {
 
 
     /* Service mode */
+    g_service_mode = true;
     /* Block termination signals before Android/Apple libraries spawn their
        internal threads; new threads inherit this mask.  Our signal_worker
        consumes SIGINT/SIGTERM via sigwait and stops the HTTP server. */

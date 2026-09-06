@@ -9,6 +9,7 @@
 bool g_2fa_pending = false;
 bool g_code_prepended = false;
 bool g_login_http = false;
+bool g_service_mode = false;
 
 void dialogHandler(long j, struct shared_ptr* protoDialogPtr,
                    struct shared_ptr* respHandler) {
@@ -66,12 +67,13 @@ void credentialHandler(struct shared_ptr* credReqPtr,
         if (g_code_prepended) {
             /* HTTP /login supplied X-Apple-2FA-Code; it is already embedded
                in amPassword.  Just resubmit as-is, no re-wait / re-append. */
-        } else if (g_login_http) {
-            /* HTTP /login: never block the request thread on a 2FA wait.
-               Flag it so handle_login replies "2fa_required" and resubmit
-               without a code; the flow will end and we map that signal. */
+        } else if (g_login_http || g_service_mode) {
+            /* HTTP service (`/login` request or any service-mode auth flow,
+               e.g. an expired lease during /m3u8): never block a server
+               thread on an interactive 2FA wait.  Flag it so the host app is
+               told "2fa_required" and resubmits the same flow with a code. */
             g_2fa_pending = true;
-            LOG_WARN("2FA required: repost /login with X-Apple-2FA-Code");
+            LOG_WARN("2FA required in service mode: repost /login with X-Apple-2FA-Code");
         } else {
             std::string path = std::string(g_base_dir) + "/2fa.txt";
             bool got_code = false;

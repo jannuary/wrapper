@@ -101,6 +101,7 @@ extern bool g_code_from_file;
 extern bool g_2fa_pending;
 extern bool g_code_prepended;
 extern bool g_login_http;
+extern bool g_service_mode;
 
 void install_hooks();
 struct shared_ptr init_ctx();
