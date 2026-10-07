@@ -1,12 +1,16 @@
 #include "internal.h"
 #include "dobby.h"
 #include "cJSON.h"
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
 #include <fstream>
+#include <sstream>
+#include <algorithm>
+#include <arpa/inet.h>
 #include <dlfcn.h>
 #include <mutex>
 #include <stdarg.h>
@@ -55,6 +59,81 @@ static void split_string_safe(const char* input, const char* delim, char** out, 
     }
 }
 
+/* ---- DNS ----
+ * Bionic's resolver does not read /etc/resolv.conf, so the nameservers have to
+ * be handed to its resolver cache explicitly.  Order of precedence:
+ *   1. LITE_DNS      comma/space separated list (the QEMU guest sets this to
+ *                    QEMU's built-in forwarder, which follows the host's DNS)
+ *   2. the nameserver lines of /etc/resolv.conf
+ *   3. a small public fallback
+ * Only literal IPv4/IPv6 addresses are accepted, and at most four are kept
+ * (bionic's MAXNS).  Do not hardcode a single region's resolvers here: a
+ * server the host cannot reach is not an error, every lookup that lands on it
+ * just stalls for the resolver timeout and logins run out of time. */
+// BEGIN dns-selection
+static const size_t kMaxNameservers = 4;
+
+static bool is_ip_literal(const std::string& s) {
+    unsigned char buf[sizeof(struct in6_addr)];
+    return inet_pton(AF_INET, s.c_str(), buf) == 1 || inet_pton(AF_INET6, s.c_str(), buf) == 1;
+}
+
+static void add_nameserver(std::vector<std::string>& out, const std::string& s) {
+    if (out.size() >= kMaxNameservers || !is_ip_literal(s)) return;
+    if (std::find(out.begin(), out.end(), s) == out.end()) out.push_back(s);
+}
+
+static std::vector<std::string> parse_dns_list(const std::string& list) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : list + ",") {
+        if (c == ',' || c == ';' || isspace((unsigned char)c)) {
+            if (!cur.empty()) add_nameserver(out, cur);
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    return out;
+}
+
+static std::vector<std::string> read_resolv_conf(const char* path) {
+    std::vector<std::string> out;
+    std::ifstream f(path);
+    std::string line;
+    while (std::getline(f, line)) {
+        std::istringstream ss(line);
+        std::string key, val;
+        if ((ss >> key >> val) && key == "nameserver") add_nameserver(out, val);
+    }
+    return out;
+}
+
+static std::vector<std::string> pick_nameservers(const char* env, const char* resolv_conf_path) {
+    std::vector<std::string> servers;
+    if (env && *env) {
+        servers = parse_dns_list(env);
+        if (!servers.empty()) return servers;
+        LOG_WARN("LITE_DNS has no valid addresses, ignoring it");
+    }
+    servers = read_resolv_conf(resolv_conf_path);
+    if (!servers.empty()) return servers;
+    return {"1.1.1.1", "223.5.5.5"};
+}
+// END dns-selection
+
+static void configure_dns() {
+    std::vector<std::string> servers = pick_nameservers(getenv("LITE_DNS"), "/etc/resolv.conf");
+    std::vector<const char*> ptrs;
+    std::string joined;
+    for (const std::string& s : servers) {
+        ptrs.push_back(s.c_str());
+        joined += (joined.empty() ? "" : ", ") + s;
+    }
+    _resolv_set_nameservers_for_net(0, ptrs.data(), (int)ptrs.size(), ".");
+    LOG_INFO("dns: %s", joined.c_str());
+}
+
 void init(const char* device_info_str) {
     LOG_INFO("initializing...");
     static char* prev_copy = nullptr;
@@ -66,8 +145,7 @@ void init(const char* device_info_str) {
     setenv("ANDROID_DNS_MODE", "local", 1);
     setenv("ANDROID_DATA", "/data", 1);
     setenv("ANDROID_ROOT", "/system", 1);
-    static const char* resolvers[2] = {"223.5.5.5", "223.6.6.6"};
-    _resolv_set_nameservers_for_net(0, resolvers, 2, ".");
+    configure_dns();
 
     union std_string conf1 = new_std_string(device_infos[8] ? device_infos[8] : "");
     union std_string conf2 = new_std_string("");

@@ -146,6 +146,20 @@ The trailing `AndroidID` is derived automatically:
 
 Pass `--device-info <string>` to override the entire string explicitly.
 
+## DNS
+
+`lite` does not use the system resolver; it hands its own nameserver list to
+Android's resolver at startup. The list is, in order:
+
+1. `LITE_DNS` — comma/space separated IPv4/IPv6 addresses (at most four are used)
+2. the `nameserver` lines of `/etc/resolv.conf`
+3. `1.1.1.1`, `223.5.5.5`
+
+The QEMU guest sets `LITE_DNS=10.0.2.3`, QEMU's built-in forwarder, which
+follows whatever DNS the host uses (VPN or split DNS included). A resolver the
+host cannot reach is not an error, it makes every lookup stall for the resolver
+timeout, which is enough to make a login fail.
+
 ## QEMU launcher arguments
 
 | Argument | Default | Description |

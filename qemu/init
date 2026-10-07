@@ -54,6 +54,10 @@ fi
 
 /bin/busybox chmod +x /system/bin/lite /system/bin/linker64 2>/dev/null || true
 
+# lite does not read resolv.conf; QEMU's user-mode network answers DNS on
+# 10.0.2.3 and forwards to whatever resolver the host uses.
+export LITE_DNS=10.0.2.3
+
 if [ -s /data/.lite-qemu-args ]; then
     echo "[init] wrapper-lite QEMU guest (custom args from file)"
     LITE_ARGS_FILE=/data/.lite-qemu-args /system/bin/lite
