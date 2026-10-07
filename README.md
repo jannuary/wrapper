@@ -142,7 +142,10 @@ The trailing `AndroidID` is derived automatically:
   persisted to `<base-dir>/ANDROID_ID`, so each account keeps a stable device
   identity across runs.
 - In service mode (no username), the persisted `ANDROID_ID` is reused; if none
-  exists, a built-in default is used.
+  exists, a random one is generated and persisted to the same file. There is no
+  shared default: Apple ties playback to the device ID, and an ID shared by
+  every install gets refused ("device linked to another Apple Account",
+  "more than one device is trying to play music").
 
 Pass `--device-info <string>` to override the entire string explicitly.
 

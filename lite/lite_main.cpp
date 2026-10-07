@@ -11,6 +11,7 @@
 #include <mutex>
 #include <chrono>
 #include <cctype>
+#include <ctime>
 #include <thread>
 #include <atomic>
 #include <unistd.h>
@@ -40,9 +41,11 @@ static std::string g_proxy;
 /* Device info: <client>/<version>/<platform>/<osver>/<model>/<build>/<locale>/<lang>/<android-id>.
    The Android ID is derived from the account username (hashed) and persisted so
    each account keeps a stable device identity; without a username the persisted
-   ID (or a default) is used. */
+   ID is used, and if there is none yet a random one is generated and persisted
+   (never a shared default: Apple ties playback to the device ID, and a value
+   shared by every install triggers its "linked to another Apple Account" and
+   "more than one device" refusals). */
 static std::string g_device_info_prefix = "Music/5.0.2/Android/10/Pixel 8/7663314/en-US/en-US";
-static std::string g_default_android_id = "e82320052964d21a";
 static std::string g_device_info_override;
 static std::string g_resolved_device_info;
 static std::string g_base_dir = "data";
@@ -137,6 +140,26 @@ static std::string hash_android_id(const std::string& username) {
     return std::string(buf);
 }
 
+/* 16 hex digits from the kernel RNG, shaped like an Android ID. */
+static std::string generate_android_id() {
+    unsigned char b[8];
+    bool ok = false;
+    FILE* f = fopen("/dev/urandom", "rb");
+    if (f) {
+        ok = fread(b, 1, sizeof(b), f) == sizeof(b);
+        fclose(f);
+    }
+    if (!ok) {
+        /* no RNG: hash the clock and pid so separate installs still differ */
+        return hash_android_id(std::to_string((long long)time(nullptr)) + ":" +
+                               std::to_string((long long)getpid()) + ":" +
+                               std::to_string((long long)clock()));
+    }
+    char buf[17];
+    for (size_t i = 0; i < sizeof(b); i++) snprintf(buf + 2 * i, 3, "%02x", b[i]);
+    return std::string(buf);
+}
+
 static std::string resolve_device_info(const std::string& username) {
     if (!g_device_info_override.empty()) return g_device_info_override;
 
@@ -159,7 +182,17 @@ static std::string resolve_device_info(const std::string& username) {
             while (!c.empty() && (c.back() == ' ' || c.back() == 10 || c.back() == 13)) c.pop_back();
             if (!c.empty()) androidId = c;
         }
-        if (androidId.empty()) androidId = g_default_android_id;
+        if (androidId.empty()) {
+            androidId = generate_android_id();
+            FILE* out = fopen(path.c_str(), "w");
+            if (out) {
+                fwrite(androidId.c_str(), 1, androidId.size(), out);
+                fclose(out);
+                LOG_INFO("generated device id and saved it to %s", path.c_str());
+            } else {
+                LOG_WARN("could not save device id to %s; it will change on restart", path.c_str());
+            }
+        }
     }
     return g_device_info_prefix + "/" + androidId;
 }
