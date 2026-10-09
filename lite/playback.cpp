@@ -81,20 +81,53 @@ const char* get_m3u8_play(unsigned long adam) {
     return nullptr;
 }
 
+// Live radio uses the linear FairPlay service rather than the catalog service.
+// Keep the destination fixed; callers cannot select an arbitrary key server.
+static const char* fairplay_server_for_uri(const std::string& uri) {
+    return uri.compare(0, 13, "skd://linear/") == 0
+        ? "https://linear.tv.apple.com/v1/radio/fairplay-streaming"
+        : "https://play.itunes.apple.com/WebObjects/MZPlay.woa/music/fps";
+}
+
+// Radio needs a streaming session; catalog tracks keep their persistent keys.
+static void request_fairplay_key(struct shared_ptr* result, union std_string* adam,
+        union std_string* uri, union std_string* format, union std_string* version,
+        union std_string* server, union std_string* protocol, union std_string* cert,
+        bool radio) {
+    if (!radio) {
+        _ZN21SVFootHillSessionCtrl16getPersistentKeyERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEES8_S8_S8_S8_S8_S8_S8_(
+            result, FHinstance, adam, adam, uri, format, version, server, protocol, cert);
+        return;
+    }
+    typedef void (*Generate)(struct shared_ptr*, void*, union std_string*,
+        union std_string*, union std_string*, union std_string*, union std_string*,
+        union std_string*, union std_string*);
+    auto generate = reinterpret_cast<Generate>(dlsym(RTLD_DEFAULT,
+        "_ZN21SVFootHillSessionCtrl22generateSessionContextERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEES8_S8_S8_S8_S8_S8_"));
+    if (!generate) { LOG_WARN("streaming session API unavailable"); return; }
+    generate(result, FHinstance, adam, uri, format, version, server, protocol, cert);
+}
+
+// The linear service uses the default protocol. The catalog's simplified
+// protocol produces an empty HTTP 500 response when sent to the linear service.
+static const char* fairplay_protocol_for_uri(const std::string& uri) {
+    return uri.compare(0, 13, "skd://linear/") == 0 ? "" : "simplified";
+}
+
 static char* get_content_key_impl(const std::string& adamId, const std::string& keyUri) {
     union std_string defaultId = new_std_string(adamId.c_str());
     union std_string keyUriStr = new_std_string(keyUri.c_str());
     union std_string keyFormat = new_std_string("com.apple.streamingkeydelivery");
     union std_string keyFormatVer = new_std_string("1");
-    union std_string serverUri = new_std_string("https://play.itunes.apple.com/WebObjects/MZPlay.woa/music/fps");
-    union std_string protocolType = new_std_string("simplified");
+    union std_string serverUri = new_std_string(fairplay_server_for_uri(keyUri));
+    union std_string protocolType = new_std_string(fairplay_protocol_for_uri(keyUri));
     union std_string fpsCertStr = new_std_string(fairplayCert);
 
     struct shared_ptr persistK;
     memset(&persistK, 0, sizeof(persistK));
-    _ZN21SVFootHillSessionCtrl16getPersistentKeyERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEES8_S8_S8_S8_S8_S8_S8_(
-        &persistK, FHinstance, &defaultId, &defaultId, &keyUriStr, &keyFormat,
-        &keyFormatVer, &serverUri, &protocolType, &fpsCertStr);
+    request_fairplay_key(&persistK, &defaultId, &keyUriStr, &keyFormat,
+        &keyFormatVer, &serverUri, &protocolType, &fpsCertStr,
+        keyUri.compare(0, 13, "skd://linear/") == 0);
 
     if (!persistK.obj) return nullptr;
     union std_string* pkey = (union std_string*)persistK.obj;
@@ -162,14 +195,14 @@ static void* getKdContext(const std::string& adam, const std::string& uri) {
     union std_string keyUri = new_std_string(uri.c_str());
     union std_string keyFormat = new_std_string("com.apple.streamingkeydelivery");
     union std_string keyFormatVer = new_std_string("1");
-    union std_string serverUri = new_std_string("https://play.itunes.apple.com/WebObjects/MZPlay.woa/music/fps");
-    union std_string protocolType = new_std_string("simplified");
+    union std_string serverUri = new_std_string(fairplay_server_for_uri(uri));
+    union std_string protocolType = new_std_string(fairplay_protocol_for_uri(uri));
     union std_string fpsCert = new_std_string(fairplayCert);
 
     struct shared_ptr persistK = {.obj = nullptr};
-    _ZN21SVFootHillSessionCtrl16getPersistentKeyERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEES8_S8_S8_S8_S8_S8_S8_(
-        &persistK, FHinstance, &defaultId, &defaultId, &keyUri, &keyFormat,
-        &keyFormatVer, &serverUri, &protocolType, &fpsCert);
+    request_fairplay_key(&persistK, &defaultId, &keyUri, &keyFormat,
+        &keyFormatVer, &serverUri, &protocolType, &fpsCert,
+        uri.compare(0, 13, "skd://linear/") == 0);
     if (!persistK.obj) return nullptr;
 
     struct shared_ptr SVFootHillPContext = {.obj = nullptr, .ctrl_blk = nullptr};
